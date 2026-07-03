@@ -1,0 +1,12 @@
+worker/node_modules/
+worker/.wrangler/
+*.log
+.DS_Store
+settings/settings.*.json
+!settings/settings.*.template.json
+.vscode/
+.idea/
+*.swp
+*~
+.claude
+.playwright-mcp

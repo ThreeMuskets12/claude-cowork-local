@@ -1,0 +1,15 @@
+{
+  "_comment": "Free Zen models.",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "ANTHROPIC_BASE_URL": "http://localhost:8787/zen",
+    "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_ZEN_WORKSPACE_KEY"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "dangerouslySkipPermissions": true
+  },
+  "model": "mimo-v2.5-free",
+  "skipWebFetchPreflight": true,
+  "skipDangerousModePermissionPrompt": true
+}
