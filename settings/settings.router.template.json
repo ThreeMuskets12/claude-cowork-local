@@ -1,0 +1,19 @@
+{
+  "_comment": "Model router: one picker, three backends. Fable 5 → OpenRouter GLM 5.2 :nitro (fastest provider). Opus 4.8 → Z.ai GLM 5.2 (subscription; run cowork-zai-login). Sonnet 5 → OpenAI GPT-5.5 (ChatGPT subscription; run cowork-openai-login). ANTHROPIC_AUTH_TOKEN is your OpenRouter key — used for the Fable route; the Z.ai and OpenAI backends use their own OAuth credentials. No fallback: each model maps to exactly one backend.",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "ANTHROPIC_BASE_URL": "http://localhost:8787/router",
+    "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_OPENROUTER_KEY",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-fable-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-fable-5"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "dangerouslySkipPermissions": true
+  },
+  "model": "claude-opus-4-8",
+  "skipWebFetchPreflight": true,
+  "skipDangerousModePermissionPrompt": true
+}

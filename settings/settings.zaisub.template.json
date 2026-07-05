@@ -1,0 +1,19 @@
+{
+  "_comment": "Z.ai GLM Coding Plan (subscription). Run `cowork-zai-login` after install to mint the credential via the ZCode OAuth flow; the proxy holds the real key, so ANTHROPIC_AUTH_TOKEN below is only a gating sentinel (any >=32-char string). GLM 5.2 is text-only; image requests escalate to glm-4.6v. Using the Coding Plan outside the official ZCode client is a ToS grey area.",
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "ANTHROPIC_BASE_URL": "http://localhost:8787/zaisub",
+    "ANTHROPIC_AUTH_TOKEN": "zaisub-sentinel-not-a-real-key-000000000000",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+    "ANTHROPIC_SMALL_FAST_MODEL": "glm-4.5-air"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions",
+    "dangerouslySkipPermissions": true
+  },
+  "model": "glm-5.2",
+  "skipWebFetchPreflight": true,
+  "skipDangerousModePermissionPrompt": true
+}

@@ -10,3 +10,6 @@ settings/settings.*.json
 *~
 .claude
 .playwright-mcp
+# Subscription credentials (also live outside the repo by default)
+zai-credential.json
+openai-credential.json

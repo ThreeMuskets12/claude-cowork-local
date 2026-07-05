@@ -6,25 +6,78 @@ import { formatOpenAIToAnthropic as toAnthropicResponse } from './translate/resp
 import { formatAnthropicToOpenAI as toOpenAIResponse } from './translate/response/anthropic-to-openai';
 import { streamOpenAIToAnthropic } from './translate/stream/openai-to-anthropic';
 import { streamAnthropicToOpenAI } from './translate/stream/anthropic-to-openai';
-import { findWebSearchTool, toOpenRouterWebSearchTool, buildWebSearchMessage, anthropicMessageToSSE } from './websearch';
+import {
+  findWebSearchTool, toOpenRouterWebSearchTool, toZaiWebSearchTool, toOpenAiWebSearchTool,
+  extractResultsFromZai, extractResultsFromAnnotations, webSearchBlocks, buildServerToolMessage,
+  lastUserText, anthropicMessageToSSE,
+} from './websearch';
+import { findWebFetchTool } from './webfetch';
+import { runWebToolLoop } from './webtools';
+import { loadCredential as loadZaiCredential } from './zai/tokenstore';
+import { credentialString as zaiCredentialString, isExpired as zaiExpired } from './zai/credential';
+import { buildZaiIdentityHeaders, buildZaiTraceHeaders } from './zai/identity';
+import { ZAI_MODELS, ZAI_VISION_MODEL } from './zai/models';
+import { getValidCredential as getOpenAiCredential } from './openai/auth';
+import { buildCodexHeaders, chatCompletionsToResponses, streamResponsesToOpenAIChat, collectResponsesToChatCompletion, CODEX_RESPONSES_URL } from './openai/responses';
 
 const OPENROUTER_UPSTREAM = "https://openrouter.ai/api/v1";
 const GO_UPSTREAM = "https://opencode.ai/zen/go/v1";
 const ZEN_UPSTREAM = "https://opencode.ai/zen/v1";
+// Z.ai GLM Coding Plan (subscription). The /zaisub route uses a credential
+// minted via the ZCode OAuth flow (run `cowork-zai-login`) as a Bearer key
+// against this OpenAI-compatible endpoint.
+const ZAISUB_UPSTREAM = "https://api.z.ai/api/coding/paas/v4";
 const DEFAULT_UPSTREAM = OPENROUTER_UPSTREAM;
 // Requests containing images are escalated to a vision-capable model
 // (GLM 5.2 is text-only).
 const VISION_MODEL = "anthropic/claude-sonnet-5";
 
-// The catalog of models the proxy advertises to Anthropic clients (Claude
-// Desktop's model picker reads GET /v1/models). Each Anthropic-style alias is
-// served by a specific OpenRouter model; ":nitro" routes to the
-// highest-throughput provider.
+// ── /openrouter route catalog ─────────────────────────────────────────────
+// The models the /openrouter route advertises (Claude Desktop's picker reads
+// GET /v1/models). Each Anthropic-style alias maps to an OpenRouter model.
 const MODEL_CATALOG: Array<{ id: string; display_name: string; created_at: string; upstream: string }> = [
   { id: "claude-opus-4-8", display_name: "Claude Opus 4.8", created_at: "2026-05-01T00:00:00Z", upstream: "z-ai/glm-5.2" },
   { id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-05-15T00:00:00Z", upstream: "anthropic/claude-sonnet-5" },
   { id: "claude-fable-5", display_name: "Claude Fable 5", created_at: "2026-06-01T00:00:00Z", upstream: "z-ai/glm-5.2:nitro" },
 ];
+
+// ── /router route: one picker, three backends ─────────────────────────────
+// The /router route advertises three Anthropic aliases and dispatches each to
+// a DIFFERENT real backend (no fallback — one model, one backend):
+//   Fable 5  → OpenRouter GLM 5.2 :nitro (fastest provider)
+//   Opus 4.8 → Z.ai GLM 5.2 (subscription, OAuth)
+//   Sonnet 5 → OpenAI GPT-5.5 (ChatGPT subscription, OAuth, Responses API)
+// Effort is mapped to whatever each backend actually respects.
+type RouterBackend = "openrouter" | "zaisub" | "openai";
+interface ModelRoute {
+  id: string;
+  display_name: string;
+  created_at: string;
+  backend: RouterBackend;
+  upstreamModel: string;
+  effort: "glm" | "openai";
+  vision?: string; // vision-capable substitute for image requests (text-only models)
+}
+const MODEL_ROUTES: ModelRoute[] = [
+  { id: "claude-fable-5",  display_name: "Claude Fable 5",  created_at: "2026-06-01T00:00:00Z", backend: "openrouter", upstreamModel: "z-ai/glm-5.2:nitro", effort: "glm",    vision: "z-ai/glm-4.6v" },
+  { id: "claude-opus-4-8", display_name: "Claude Opus 4.8", created_at: "2026-05-01T00:00:00Z", backend: "zaisub",     upstreamModel: "glm-5.2",           effort: "glm",    vision: "glm-4.6v" },
+  { id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-05-15T00:00:00Z", backend: "openai",     upstreamModel: "gpt-5.5",           effort: "openai" },
+];
+// Claude Code makes background calls with non-catalog model ids (e.g. haiku);
+// route those to a cheap default so the client keeps working.
+const DEFAULT_ROUTE: ModelRoute = {
+  id: "default", display_name: "default", created_at: "2026-06-01T00:00:00Z",
+  backend: "openrouter", upstreamModel: "z-ai/glm-5.2", effort: "glm", vision: "z-ai/glm-4.6v",
+};
+
+function resolveModelRoute(model: any): ModelRoute {
+  if (typeof model === "string") {
+    const m = model.replace(/^us\./, "").replace(/-\d{8}$/, "").replace(/-latest$/, "");
+    const found = MODEL_ROUTES.find((r) => m === r.id || m.startsWith(`${r.id}-`));
+    if (found) return found;
+  }
+  return DEFAULT_ROUTE;
+}
 
 const API_START_PATHS = new Set(['v1', 'v2', 'api']);
 
@@ -32,6 +85,7 @@ type RouteConfig = {
   path: string;
   upstream: string;
   modelOverride: string | null;
+  router?: boolean;
 };
 
 function stripPrefix(path: string, prefix: string): string | null {
@@ -50,6 +104,12 @@ function extractModelSegment(path: string): { path: string; model: string | null
 
 function routeConfig(request: Request): RouteConfig {
   const path = new URL(request.url).pathname;
+  const routerPath = stripPrefix(path, "/router");
+  if (routerPath) {
+    // Backend is chosen per-model in the handler; upstream is a placeholder.
+    return { path: routerPath, upstream: OPENROUTER_UPSTREAM, modelOverride: null, router: true };
+  }
+
   const openrouterPath = stripPrefix(path, "/openrouter");
   if (openrouterPath) {
     const { path: remaining, model } = extractModelSegment(openrouterPath);
@@ -66,6 +126,12 @@ function routeConfig(request: Request): RouteConfig {
   if (zenPath) {
     const { path: remaining, model } = extractModelSegment(zenPath);
     return { path: remaining, upstream: ZEN_UPSTREAM, modelOverride: model };
+  }
+
+  const zaisubPath = stripPrefix(path, "/zaisub");
+  if (zaisubPath) {
+    const { path: remaining, model } = extractModelSegment(zaisubPath);
+    return { path: remaining, upstream: ZAISUB_UPSTREAM, modelOverride: model };
   }
 
   const { path: remaining, model } = extractModelSegment(path);
@@ -96,6 +162,43 @@ function isOpenRouterUpstream(upstream: string): boolean {
   return upstream.startsWith("https://openrouter.ai/");
 }
 
+function isZaisubUpstream(upstream: string): boolean {
+  return upstream === ZAISUB_UPSTREAM;
+}
+
+/**
+ * Resolve the Z.ai coding-plan credential for a /zaisub request, or return an
+ * Anthropic-shaped 401 telling the user to (re-)run `cowork-zai-login`.
+ */
+function resolveZaiCredentialOrError(): { headers: Record<string, string> } | { error: Response } {
+  const authError = (message: string): Response =>
+    new Response(JSON.stringify({ error: { type: "authentication_error", message } }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  const cred = loadZaiCredential();
+  if (!cred) return { error: authError("Z.ai credential not found. Run `cowork-zai-login` to sign in.") };
+  if (zaiExpired(cred)) return { error: authError("Z.ai credential expired. Re-run `cowork-zai-login`.") };
+  return {
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${zaiCredentialString(cred)}`,
+      ...buildZaiIdentityHeaders(),
+      ...buildZaiTraceHeaders(),
+    },
+  };
+}
+
+/** A 401 from Z.ai means the credential was rejected — surface the re-login hint. */
+function zaisubUpstreamError(res: Response, body: string): Response {
+  if (res.status === 401) {
+    return new Response(JSON.stringify({ error: { type: "authentication_error",
+      message: "Z.ai rejected the credential (401). Re-run `cowork-zai-login` to refresh." } }),
+      { status: 401, headers: { "Content-Type": "application/json" } });
+  }
+  return upstreamErrorResponse(res, body);
+}
+
 /**
  * Map Anthropic model IDs onto OpenRouter slugs.
  *
@@ -115,7 +218,9 @@ function mapModelForOpenRouter(model: any): any {
 }
 
 function isGlmModel(model: any): boolean {
-  return typeof model === "string" && model.startsWith("z-ai/glm");
+  // Matches both the OpenRouter slug ("z-ai/glm-5.2") and the bare Z.ai
+  // coding-plan id ("glm-5.2").
+  return typeof model === "string" && (model.startsWith("z-ai/glm") || model.startsWith("glm-"));
 }
 
 /**
@@ -140,6 +245,27 @@ function mapEffortToReasoning(req: any): any | null {
   return null; // no explicit setting — leave the provider default
 }
 
+/**
+ * Map Anthropic thinking/effort onto the OpenAI Responses `reasoning` object,
+ * restricted to the levels GPT-5.x respects (minimal | low | medium | high).
+ * `thinking: {type:"disabled"}` → minimal; Anthropic's xhigh/max clamp to high.
+ */
+function mapEffortToOpenAIReasoning(req: any): any | null {
+  if (req?.thinking?.type === "disabled") return { effort: "minimal" };
+  const effort = req?.output_config?.effort;
+  const EFFORT_MAP: Record<string, string> = {
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "high",
+    max: "high",
+  };
+  if (typeof effort === "string" && EFFORT_MAP[effort]) {
+    return { effort: EFFORT_MAP[effort], summary: "auto" };
+  }
+  return null;
+}
+
 function hasImages(body: any): boolean {
   const messages = body?.messages;
   if (!Array.isArray(messages)) return false;
@@ -155,6 +281,160 @@ function upstreamErrorResponse(res: Response, body: string): Response {
     if (value) headers.set(name, value);
   }
   return new Response(body, { status: res.status, headers });
+}
+
+const SSE_HEADERS = { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" };
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+function authError401(message: string): Response {
+  return new Response(JSON.stringify({ error: { type: "authentication_error", message } }), { status: 401, headers: JSON_HEADERS });
+}
+
+/**
+ * Drive a GLM Chat-Completions backend (OpenRouter or Z.ai), interpreting
+ * Claude Code's WebSearch/WebFetch server tools. When either is present the
+ * request runs through the web-tool loop (native search + locally-executed
+ * fetch, buffered and reshaped into Anthropic server-tool blocks); otherwise
+ * it's a plain single call.
+ */
+async function glmChatCompletion(opts: {
+  backend: "openrouter" | "zaisub";
+  upstream: string;
+  headers: Record<string, string>;
+  openaiReq: any;
+  anthropicReq: any;
+  model: string;
+}): Promise<Response> {
+  const { backend, upstream, headers, openaiReq, anthropicReq, model } = opts;
+  const searchTool = findWebSearchTool(anthropicReq.tools);
+  const fetchTool = findWebFetchTool(anthropicReq.tools);
+  const wantStream = !!anthropicReq.stream;
+
+  const callUpstream = async (reqBody: any): Promise<Response> => {
+    const res = await fetch(`${upstream}/chat/completions`, { method: "POST", headers, body: JSON.stringify(reqBody) });
+    if (!res.ok) {
+      throw { __response: backend === "zaisub" ? zaisubUpstreamError(res, await res.text()) : upstreamErrorResponse(res, await res.text()) };
+    }
+    return res;
+  };
+
+  if (searchTool || fetchTool) {
+    const providerSearchTool = searchTool
+      ? (backend === "zaisub" ? toZaiWebSearchTool(searchTool) : toOpenRouterWebSearchTool(searchTool))
+      : null;
+    const extractSearch = backend === "zaisub"
+      ? extractResultsFromZai
+      : (c: any) => extractResultsFromAnnotations(c?.choices?.[0]?.message?.annotations);
+    try {
+      const message = await runWebToolLoop({
+        openaiReq, model, query: lastUserText(anthropicReq),
+        searchTool: providerSearchTool, wantFetch: !!fetchTool, extractSearch,
+        callUpstream: async (reqBody: any) => (await callUpstream(reqBody)).json(),
+      });
+      return wantStream
+        ? new Response(anthropicMessageToSSE(message), { headers: SSE_HEADERS })
+        : new Response(JSON.stringify(message), { headers: JSON_HEADERS });
+    } catch (e: any) {
+      if (e && e.__response) return e.__response as Response;
+      throw e;
+    }
+  }
+
+  let res: Response;
+  try { res = await callUpstream(openaiReq); } catch (e: any) { if (e && e.__response) return e.__response as Response; throw e; }
+  if (openaiReq.stream) return new Response(streamOpenAIToAnthropic(res.body as ReadableStream, model), { headers: SSE_HEADERS });
+  const data: any = await res.json();
+  return new Response(JSON.stringify(toAnthropicResponse(data, model)), { headers: JSON_HEADERS });
+}
+
+/**
+ * /router dispatch: translate the Anthropic request once, then send it to the
+ * backend chosen for this model. GLM backends (OpenRouter, Z.ai) use Chat
+ * Completions; the OpenAI backend uses the Responses API (codex) and is
+ * bridged back through the same Chat-Completions → Anthropic translators.
+ */
+async function handleRouterDispatch(req: any, originalModel: string, dispatch: ModelRoute, callerKey: string): Promise<Response> {
+  const openaiReq = formatAnthropicToOpenAI(req);
+
+  if (dispatch.backend === "openai") {
+    const reasoning = mapEffortToOpenAIReasoning(req);
+    if (reasoning) openaiReq.reasoning = reasoning;
+    const responsesReq = chatCompletionsToResponses(openaiReq);
+
+    // WebSearch → OpenAI's built-in Responses web search tool. (WebFetch on the
+    // Responses backend needs a Responses-format tool loop — not yet wired.)
+    const searchTool = findWebSearchTool(req.tools);
+    if (searchTool) {
+      responsesReq.tools = [...(responsesReq.tools || []), toOpenAiWebSearchTool(searchTool)];
+    }
+
+    let cred: Awaited<ReturnType<typeof getOpenAiCredential>> = null;
+    try { cred = await getOpenAiCredential(); } catch { cred = null; }
+    if (!cred) return authError401("OpenAI credential not found or refresh failed. Run `cowork-openai-login`.");
+
+    let res = await fetch(CODEX_RESPONSES_URL, { method: "POST", headers: buildCodexHeaders(cred), body: JSON.stringify(responsesReq) });
+    if (res.status === 401) {
+      // Access token may have just expired — force a refresh and retry once.
+      try {
+        const refreshed = await getOpenAiCredential(true);
+        if (refreshed) res = await fetch(CODEX_RESPONSES_URL, { method: "POST", headers: buildCodexHeaders(refreshed), body: JSON.stringify(responsesReq) });
+      } catch { /* fall through */ }
+    }
+    if (!res.ok) {
+      if (res.status === 401) return authError401("OpenAI rejected the credential (401). Re-run `cowork-openai-login`.");
+      return upstreamErrorResponse(res, await res.text());
+    }
+    const responsesSSE = res.body as ReadableStream;
+
+    // With search, buffer to collect url_citation annotations, reshape into
+    // Anthropic web_search_tool_result blocks, and re-stream if needed.
+    if (searchTool) {
+      const cc = await collectResponsesToChatCompletion(responsesSSE, originalModel);
+      const msg = cc.choices?.[0]?.message ?? {};
+      const results = extractResultsFromAnnotations(msg.annotations);
+      const message = buildServerToolMessage({
+        model: originalModel,
+        blocks: webSearchBlocks(results, lastUserText(req)),
+        text: typeof msg.content === "string" ? msg.content : undefined,
+        reasoning: typeof msg.reasoning_content === "string" ? msg.reasoning_content : undefined,
+        usage: cc.usage,
+        searchRequests: 1,
+      });
+      return req.stream
+        ? new Response(anthropicMessageToSSE(message), { headers: SSE_HEADERS })
+        : new Response(JSON.stringify(message), { headers: JSON_HEADERS });
+    }
+
+    if (req.stream) {
+      const chatSSE = streamResponsesToOpenAIChat(responsesSSE, originalModel);
+      return new Response(streamOpenAIToAnthropic(chatSSE, originalModel), { headers: SSE_HEADERS });
+    }
+    const cc = await collectResponsesToChatCompletion(responsesSSE, originalModel);
+    return new Response(JSON.stringify(toAnthropicResponse(cc, originalModel)), { headers: JSON_HEADERS });
+  }
+
+  // GLM backends — OpenAI Chat Completions (+ web-tool interpreter).
+  if (isGlmModel(req.model)) {
+    const reasoning = mapEffortToReasoning(req);
+    if (reasoning) openaiReq.reasoning = reasoning;
+  }
+
+  let upstream: string;
+  let headers: Record<string, string>;
+  if (dispatch.backend === "zaisub") {
+    upstream = ZAISUB_UPSTREAM;
+    const resolved = resolveZaiCredentialOrError();
+    if ("error" in resolved) return resolved.error;
+    headers = resolved.headers;
+  } else {
+    upstream = OPENROUTER_UPSTREAM;
+    headers = { "Content-Type": "application/json", "Authorization": `Bearer ${callerKey}` };
+  }
+
+  return await glmChatCompletion({
+    backend: dispatch.backend === "zaisub" ? "zaisub" : "openrouter",
+    upstream, headers, openaiReq, anthropicReq: req, model: originalModel,
+  });
 }
 
 async function handleRequest(request: Request): Promise<Response> {
@@ -179,53 +459,63 @@ async function handleRequest(request: Request): Promise<Response> {
       const err = validateApiKey(key);
       if (err) return authErrorResponse(err);
 
+      // ── /router: dispatch by model to one of three backends ──────────────
+      if (route.router) {
+        const req: any = await request.json();
+        const originalModel = req.model;
+        const dispatch = resolveModelRoute(req.model);
+        req.model = hasImages(req) && dispatch.vision ? dispatch.vision : dispatch.upstreamModel;
+        return await handleRouterDispatch(req, originalModel, dispatch, key!);
+      }
+
       if (fmt === "openai") {
         const req: any = await request.json();
         const originalModel = req.model;
         const openrouter = isOpenRouterUpstream(upstream);
+        const zaisub = isZaisubUpstream(upstream);
+
+        // /zaisub swaps the caller's sentinel for the resolved Z.ai credential
+        // + ZCode fingerprint headers; every other route uses the caller's key.
+        let outHeaders: Record<string, string> = {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${key}`,
+        };
+        if (zaisub) {
+          const resolved = resolveZaiCredentialOrError();
+          if ("error" in resolved) return resolved.error;
+          outHeaders = resolved.headers;
+        }
+
         if (route.modelOverride) req.model = route.modelOverride;
-        if (hasImages(req) && openrouter) {
-          req.model = VISION_MODEL;
+        if (hasImages(req)) {
+          if (openrouter) req.model = VISION_MODEL;
+          else if (zaisub) req.model = ZAI_VISION_MODEL;
         }
         if (openrouter) req.model = mapModelForOpenRouter(req.model);
 
-        const webSearchTool = openrouter ? findWebSearchTool(req.tools) : null;
         const openaiReq = formatAnthropicToOpenAI(req);
-        if (openrouter) {
-          if (isGlmModel(req.model)) {
-            const reasoning = mapEffortToReasoning(req);
-            if (reasoning) openaiReq.reasoning = reasoning;
-          }
-          if (webSearchTool) {
-            openaiReq.tools = [...(openaiReq.tools || []), toOpenRouterWebSearchTool(webSearchTool)];
-            // Search citations only arrive on the complete message, so buffer
-            // the upstream call and re-stream the result to the client below.
-            delete openaiReq.stream;
-            delete openaiReq.stream_options;
-          }
+        // GLM effort mapping applies on both the OpenRouter and /zaisub routes.
+        if ((openrouter || zaisub) && isGlmModel(req.model)) {
+          const reasoning = mapEffortToReasoning(req);
+          if (reasoning) openaiReq.reasoning = reasoning;
         }
+
+        // OpenRouter and Z.ai go through the web-tool-aware GLM path (native
+        // WebSearch + locally-executed WebFetch); other OpenAI upstreams
+        // (Zen/Go/custom) use the plain relay.
+        if (openrouter || zaisub) {
+          return await glmChatCompletion({
+            backend: zaisub ? "zaisub" : "openrouter",
+            upstream, headers: outHeaders, openaiReq, anthropicReq: req, model: originalModel,
+          });
+        }
+
         const res = await fetch(`${upstream}/chat/completions`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${key}`,
-          },
+          headers: outHeaders,
           body: JSON.stringify(openaiReq),
         });
         if (!res.ok) return upstreamErrorResponse(res, await res.text());
-
-        if (webSearchTool) {
-          const data: any = await res.json();
-          const message = buildWebSearchMessage(data, originalModel, req);
-          if (req.stream) {
-            return new Response(anthropicMessageToSSE(message), {
-              headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" },
-            });
-          }
-          return new Response(JSON.stringify(message), {
-            headers: { "Content-Type": "application/json" },
-          });
-        }
 
         if (openaiReq.stream) {
           return new Response(streamOpenAIToAnthropic(res.body as ReadableStream, originalModel), {
@@ -274,7 +564,18 @@ async function handleRequest(request: Request): Promise<Response> {
         });
       }
 
-      // Pass-through to OpenAI upstream
+      // Pass-through to OpenAI upstream (Z.ai uses the resolved credential).
+      if (isZaisubUpstream(upstream)) {
+        const resolved = resolveZaiCredentialOrError();
+        if ("error" in resolved) return resolved.error;
+        const res = await fetch(`${upstream}/chat/completions`, {
+          method: "POST",
+          headers: resolved.headers,
+          body: await request.text(),
+        });
+        if (!res.ok) return zaisubUpstreamError(res, await res.text());
+        return new Response(res.body, { status: res.status, headers: res.headers });
+      }
       const res = await fetch(`${upstream}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
@@ -288,6 +589,16 @@ async function handleRequest(request: Request): Promise<Response> {
       const key = extractApiKey(request.headers);
       const err = validateApiKey(key);
       if (err) return authErrorResponse(err);
+
+      // The /router route advertises the three cross-backend aliases.
+      if (route.router) {
+        const data = MODEL_ROUTES.map(({ id, display_name, created_at }) => ({
+          type: "model", id, display_name, created_at,
+        }));
+        return new Response(JSON.stringify({
+          data, has_more: false, first_id: data[0].id, last_id: data[data.length - 1].id,
+        }), { headers: JSON_HEADERS });
+      }
 
       // On the OpenRouter route, advertise the proxy's own catalog in
       // Anthropic list format (Claude Desktop's model picker reads this)
@@ -307,10 +618,27 @@ async function handleRequest(request: Request): Promise<Response> {
         }), { headers: { "Content-Type": "application/json" } });
       }
 
+      // On the /zaisub route, advertise the GLM coding-plan catalog (static —
+      // no upstream call needed, and it needs the resolved credential anyway).
+      if (fmt === "openai" && isZaisubUpstream(upstream)) {
+        const data = ZAI_MODELS.map(({ id, display_name }) => ({
+          type: "model",
+          id,
+          display_name,
+          created_at: "2026-06-16T00:00:00Z",
+        }));
+        return new Response(JSON.stringify({
+          data,
+          has_more: false,
+          first_id: data[0].id,
+          last_id: data[data.length - 1].id,
+        }), { headers: { "Content-Type": "application/json" } });
+      }
+
       const res = fmt === "anthropic"
         ? await fetch(`${upstream}/v1/models`, {
             method: "GET",
-            headers: anthropicHeaders(request, key),
+            headers: anthropicHeaders(request, key!),
           })
         : await fetch(`${upstream}/models`, {
             method: "GET",
@@ -324,9 +652,11 @@ async function handleRequest(request: Request): Promise<Response> {
     name: "opencode-cowork-proxy",
     upstream,
     routes: {
+      "/router": "model-based dispatch (Fable→OpenRouter, Opus→Z.ai, Sonnet→OpenAI)",
       "/openrouter": OPENROUTER_UPSTREAM,
       "/go": GO_UPSTREAM,
       "/zen": ZEN_UPSTREAM,
+      "/zaisub": ZAISUB_UPSTREAM,
       "(default)": DEFAULT_UPSTREAM,
     },
     endpoints: {

@@ -74,6 +74,11 @@ collect_keys() {
   echo "  - Go key: same as Zen key. Required only for the /go profile (paid Go models)."
   echo "    Press Enter to skip any of them."
   echo
+  echo "  - Z.ai subscription (GLM Coding Plan): no key needed now."
+  echo "    After install, run:  cowork-zai-login      (browser sign-in to Z.ai)"
+  echo "  - OpenAI ChatGPT subscription (for Sonnet 5 → GPT-5.5): no key needed now."
+  echo "    After install, run:  cowork-openai-login   (browser sign-in to ChatGPT)"
+  echo
   prompt_secret OPENROUTER_KEY "OpenRouter key (sk-or-…)"
   prompt_secret ZEN_KEY "Zen key (sk-…)"
   if [ -z "$GO_KEY" ]; then GO_KEY="$ZEN_KEY"; fi
@@ -85,7 +90,7 @@ write_settings() {
   blue "→ writing settings to $CLAUDE_DIR/"
   mkdir -p "$CLAUDE_DIR"
 
-  for profile in openrouter zen go; do
+  for profile in router openrouter zen go zaisub; do
     src="$SETTINGS_DIR/settings.$profile.template.json"
     dst="$CLAUDE_DIR/settings.$profile.json"
     if [ ! -f "$src" ]; then
@@ -100,6 +105,7 @@ write_settings() {
     if [ "$profile" = "go" ] && [ -z "$GO_KEY" ]; then
       yellow "skipping $profile (no GO_KEY)"; continue
     fi
+    # zaisub needs no key here — the credential is minted later by cowork-zai-login.
 
     sed \
       -e "s|REPLACE_WITH_YOUR_OPENROUTER_KEY|$OPENROUTER_KEY|g" \
@@ -114,10 +120,10 @@ write_settings() {
 install_bin() {
   blue "→ installing bin scripts to ~/.local/bin/"
   mkdir -p "$HOME/.local/bin"
-  for f in start stop status log; do
+  for f in start stop status log zai-login openai-login; do
     ln -sf "$ROOT/bin/$f.sh" "$HOME/.local/bin/cowork-$f"
   done
-  green "✓ cowork-start / cowork-stop / cowork-status / cowork-log"
+  green "✓ cowork-start / cowork-stop / cowork-status / cowork-log / cowork-zai-login / cowork-openai-login"
 }
 
 # ---------- 6. Systemd (optional) ----------
@@ -190,12 +196,14 @@ main() {
   echo "  Worker log:      cowork-log       (or: tail -f $LOG_DIR/worker.log)"
   echo
   echo "  Run Claude Code with a profile:"
-  echo "    claude --settings $CLAUDE_DIR/settings.openrouter.json   (default: GLM 5.2 via OpenRouter)"
+  echo "    claude --settings $CLAUDE_DIR/settings.router.json       (Fable→OpenRouter, Opus→Z.ai, Sonnet→OpenAI)"
+  echo "    claude --settings $CLAUDE_DIR/settings.openrouter.json   (all models → OpenRouter GLM 5.2)"
+  echo "    claude --settings $CLAUDE_DIR/settings.zaisub.json       (Z.ai Coding Plan; run cowork-zai-login first)"
   echo "    claude --settings $CLAUDE_DIR/settings.zen.json"
   echo "    claude --settings $CLAUDE_DIR/settings.go.json"
   echo
   echo "  Or copy any of them to $CLAUDE_DIR/settings.json to make it default, e.g.:"
-  echo "    cp $CLAUDE_DIR/settings.openrouter.json $CLAUDE_DIR/settings.json"
+  echo "    cp $CLAUDE_DIR/settings.router.json $CLAUDE_DIR/settings.json"
 }
 
 main "$@"
