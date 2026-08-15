@@ -1,19 +1,20 @@
 {
-  "_comment": "OpenRouter (default provider). The proxy advertises one model, aliased as claude-sonnet-5 so Claude Code displays 'Sonnet 5'; the real upstream is google/gemini-3.7-flash:nitro (throughput-optimized providers). Every model slot maps to it, images included. skipWebFetchPreflight keeps native WebFetch working behind the local proxy.",
+  "_comment": "OpenRouter (default provider). The proxy advertises one model, aliased as claude-sonnet-5[1m] so Claude Code displays 'Sonnet 5' and uses a 1M context window; the real upstream is google/gemini-3.7-flash:nitro (throughput-optimized providers), whose native window is 1,048,576 tokens. The [1m] suffix is what lifts the client off its 200k default. CLAUDE_CODE_AUTO_COMPACT_WINDOW overrides the 500k auto-compact default Claude Code hardcodes for sonnet-5. Every model slot maps to the same upstream, images included. skipWebFetchPreflight keeps native WebFetch working behind the local proxy.",
   "env": {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
     "ANTHROPIC_BASE_URL": "http://localhost:8787/openrouter",
     "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_OPENROUTER_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-5",
-    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-5[1m]",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5[1m]",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"
   },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "dangerouslySkipPermissions": true
   },
-  "model": "claude-sonnet-5",
+  "model": "claude-sonnet-5[1m]",
   "skipWebFetchPreflight": true,
   "skipDangerousModePermissionPrompt": true
 }

@@ -35,8 +35,11 @@ const DEFAULT_UPSTREAM = OPENROUTER_UPSTREAM;
 const OPENROUTER_MODEL = "google/gemini-3.7-flash:nitro";
 // Advertised under the Anthropic alias claude-sonnet-5 so Claude Code's
 // picker and status line show "Sonnet 5"; the upstream is still Gemini.
+// The [1m] suffix is what makes Claude Code use a 1M context window instead of
+// its 200k default — it keys the window off the model id, not off /v1/models.
+// Gemini 3.7 Flash's real window is 1,048,576, so the claim holds upstream.
 const MODEL_CATALOG: Array<{ id: string; display_name: string; created_at: string; upstream: string }> = [
-  { id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-05-15T00:00:00Z", upstream: OPENROUTER_MODEL },
+  { id: "claude-sonnet-5[1m]", display_name: "Claude Sonnet 5 (1M context)", created_at: "2026-05-15T00:00:00Z", upstream: OPENROUTER_MODEL },
 ];
 
 // Gemini 3.7 Flash is multimodal, so image requests need no escalation.
