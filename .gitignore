@@ -13,3 +13,5 @@ settings/settings.*.json
 # Subscription credentials (also live outside the repo by default)
 zai-credential.json
 openai-credential.json
+bin/cowork-menubar
+bin/CoworkMenu.app
