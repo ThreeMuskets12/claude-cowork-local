@@ -11,12 +11,16 @@ if [ -z "$PIDS" ]; then
 fi
 
 echo "killing: $PIDS"
-echo "$PIDS" | xargs -r kill -9 2>/dev/null || true
+echo "$PIDS" | xargs kill -9 2>/dev/null || true
 sleep 0.3
 
-if ss -tln 2>/dev/null | grep -q ":$PROXY_PORT " || netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
+if ss -tln 2>/dev/null | grep -q ":$PROXY_PORT " \
+  || lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 \
+  || netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
   echo "✗ port $PROXY_PORT still bound:"
-  ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " || netstat -tlnp 2>/dev/null | grep ":$PROXY_PORT "
+  ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " \
+    || lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null \
+    || netstat -tlnp 2>/dev/null | grep ":$PROXY_PORT "
   exit 1
 fi
 

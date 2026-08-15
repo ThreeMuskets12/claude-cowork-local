@@ -9,8 +9,15 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 
 mkdir -p "$LOG_DIR"
 
+# Portable listen check: ss (Linux), lsof (macOS/BSD), netstat -tln (Linux).
+port_listening() {
+  ss -tln 2>/dev/null | grep -q ":$PROXY_PORT " \
+    || lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1 \
+    || netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "
+}
+
 # Already running?
-if ss -tln 2>/dev/null | grep -q ":$PROXY_PORT " || netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
+if port_listening; then
   echo "✓ worker already listening on :$PROXY_PORT"
   exit 0
 fi
@@ -29,7 +36,7 @@ fi
 
 # Wait for the port to come up (max 5s)
 for i in {1..10}; do
-  if ss -tln 2>/dev/null | grep -q ":$PROXY_PORT " || netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
+  if port_listening; then
     echo "✓ worker started on http://localhost:$PROXY_PORT (log: $LOG_DIR/worker.log)"
     exit 0
   fi

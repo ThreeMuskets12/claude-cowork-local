@@ -28,18 +28,19 @@ const ZEN_UPSTREAM = "https://opencode.ai/zen/v1";
 // against this OpenAI-compatible endpoint.
 const ZAISUB_UPSTREAM = "https://api.z.ai/api/coding/paas/v4";
 const DEFAULT_UPSTREAM = OPENROUTER_UPSTREAM;
-// Requests containing images are escalated to a vision-capable model
-// (GLM 5.2 is text-only).
-const VISION_MODEL = "anthropic/claude-sonnet-5";
-
 // ── /openrouter route catalog ─────────────────────────────────────────────
 // The models the /openrouter route advertises (Claude Desktop's picker reads
-// GET /v1/models). Each Anthropic-style alias maps to an OpenRouter model.
+// GET /v1/models). Single entry: everything on this route runs Gemini 3.7
+// Flash through OpenRouter's :nitro (throughput-optimized) providers.
+const OPENROUTER_MODEL = "google/gemini-3.7-flash:nitro";
+// Advertised under the Anthropic alias claude-sonnet-5 so Claude Code's
+// picker and status line show "Sonnet 5"; the upstream is still Gemini.
 const MODEL_CATALOG: Array<{ id: string; display_name: string; created_at: string; upstream: string }> = [
-  { id: "claude-opus-4-8", display_name: "Claude Opus 4.8", created_at: "2026-05-01T00:00:00Z", upstream: "z-ai/glm-5.2" },
-  { id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-05-15T00:00:00Z", upstream: "anthropic/claude-sonnet-5" },
-  { id: "claude-fable-5", display_name: "Claude Fable 5", created_at: "2026-06-01T00:00:00Z", upstream: "z-ai/glm-5.2:nitro" },
+  { id: "claude-sonnet-5", display_name: "Claude Sonnet 5", created_at: "2026-05-15T00:00:00Z", upstream: OPENROUTER_MODEL },
 ];
+
+// Gemini 3.7 Flash is multimodal, so image requests need no escalation.
+const VISION_MODEL = OPENROUTER_MODEL;
 
 // ── /router route: one picker, three backends ─────────────────────────────
 // The /router route advertises three Anthropic aliases and dispatches each to
@@ -204,17 +205,15 @@ function zaisubUpstreamError(res: Response, body: string): Response {
  *
  * Catalog aliases (what the proxy advertises on /v1/models) map to their
  * configured upstream. Other Anthropic IDs — Claude Code sends e.g.
- * "claude-haiku-4-5-20251001" for internal calls — fall back to the
- * generic "anthropic/<model>" slug so they still resolve upstream.
+ * "claude-haiku-4-5-20251001" for internal calls — also resolve to the single
+ * catalog model, so this route never reaches a second upstream.
  */
 function mapModelForOpenRouter(model: any): any {
   if (typeof model !== "string" || model.includes("/")) return model;
-  let m = model.replace(/^us\./, "").replace(/-\d{8}$/, "").replace(/-latest$/, "");
+  const m = model.replace(/^us\./, "").replace(/-\d{8}$/, "").replace(/-latest$/, "");
   const catalogEntry = MODEL_CATALOG.find((entry) => m === entry.id || m.startsWith(`${entry.id}-`));
   if (catalogEntry) return catalogEntry.upstream;
-  if (!m.startsWith("claude-")) return model;
-  m = m.replace(/(\d)-(\d)/g, "$1.$2");
-  return `anthropic/${m}`;
+  return OPENROUTER_MODEL;
 }
 
 function isGlmModel(model: any): boolean {

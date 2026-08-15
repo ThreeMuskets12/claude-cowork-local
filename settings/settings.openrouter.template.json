@@ -1,19 +1,19 @@
 {
-  "_comment": "OpenRouter (default provider). The proxy advertises three models: claude-opus-4-8 -> GLM 5.2, claude-sonnet-5 -> Sonnet 5, claude-fable-5 -> GLM 5.2 :nitro (fastest provider). Requests containing images are escalated to Claude Sonnet 5. skipWebFetchPreflight keeps native WebFetch working behind the local proxy.",
+  "_comment": "OpenRouter (default provider). The proxy advertises one model, aliased as claude-sonnet-5 so Claude Code displays 'Sonnet 5'; the real upstream is google/gemini-3.7-flash:nitro (throughput-optimized providers). Every model slot maps to it, images included. skipWebFetchPreflight keeps native WebFetch working behind the local proxy.",
   "env": {
     "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
     "ANTHROPIC_BASE_URL": "http://localhost:8787/openrouter",
     "ANTHROPIC_AUTH_TOKEN": "REPLACE_WITH_YOUR_OPENROUTER_KEY",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "z-ai/glm-5.2",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "z-ai/glm-5.2",
-    "ANTHROPIC_SMALL_FAST_MODEL": "z-ai/glm-5.2"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-sonnet-5",
+    "ANTHROPIC_SMALL_FAST_MODEL": "claude-sonnet-5"
   },
   "permissions": {
     "defaultMode": "bypassPermissions",
     "dangerouslySkipPermissions": true
   },
-  "model": "claude-opus-4-8",
+  "model": "claude-sonnet-5",
   "skipWebFetchPreflight": true,
   "skipDangerousModePermissionPrompt": true
 }

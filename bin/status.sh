@@ -10,6 +10,8 @@ ps -ef | awk '/[b]un .*server\.ts/ {printf "  pid=%s  ppid=%s  cmd=%s\n", $2, $3
 echo "── port :$PROXY_PORT ──"
 if ss -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
   ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " | sed 's/^/  /'
+elif lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  lsof -nP -iTCP:"$PROXY_PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | sed 's/^/  /'
 elif netstat -tln 2>/dev/null | grep -q ":$PROXY_PORT "; then
   netstat -tlnp 2>/dev/null | grep ":$PROXY_PORT " | sed 's/^/  /'
 else
