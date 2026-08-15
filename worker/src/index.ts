@@ -11,8 +11,8 @@ import {
   extractResultsFromZai, extractResultsFromAnnotations, webSearchBlocks, buildServerToolMessage,
   lastUserText, anthropicMessageToSSE,
 } from './websearch';
-import { findWebFetchTool } from './webfetch';
-import { runWebToolLoop } from './webtools';
+import { findWebFetchTool, webFetchFunctionTool } from './webfetch';
+import { runWebToolLoop, streamWebToolLoop } from './webtools';
 import { loadCredential as loadZaiCredential } from './zai/tokenstore';
 import { credentialString as zaiCredentialString, isExpired as zaiExpired } from './zai/credential';
 import { buildZaiIdentityHeaders, buildZaiTraceHeaders } from './zai/identity';
@@ -41,6 +41,11 @@ const MODEL_CATALOG: Array<{ id: string; display_name: string; created_at: strin
 
 // Gemini 3.7 Flash is multimodal, so image requests need no escalation.
 const VISION_MODEL = OPENROUTER_MODEL;
+// Gemini's reasoning is mandatory and billed against max_tokens, so a small
+// cap is spent entirely on thinking and comes back finish_reason "length" with
+// no text at all (measured: 128 tokens → empty). Claude Code's background
+// calls — titles, summaries — set caps that low, so floor the upstream cap.
+const GEMINI_MIN_OUTPUT_TOKENS = 1024;
 
 // ── /router route: one picker, three backends ─────────────────────────────
 // The /router route advertises three Anthropic aliases and dispatches each to
@@ -222,14 +227,22 @@ function isGlmModel(model: any): boolean {
   return typeof model === "string" && (model.startsWith("z-ai/glm") || model.startsWith("glm-"));
 }
 
+function isGeminiModel(model: any): boolean {
+  return typeof model === "string" && model.startsWith("google/gemini");
+}
+
 /**
  * Map Anthropic thinking/effort settings onto OpenRouter's normalized
  * `reasoning` parameter, restricted to the levels GLM 5.2 actually respects
  * (low | medium | high — there is no xhigh/max on OpenRouter, so Anthropic's
  * higher tiers clamp to "high").
  */
-function mapEffortToReasoning(req: any): any | null {
-  if (req?.thinking?.type === "disabled") return { enabled: false };
+function mapEffortToReasoning(req: any, model?: any): any | null {
+  // Gemini 3.x reasoning is mandatory — OpenRouter rejects {enabled:false} and
+  // effort "none" with a 400, so "off" becomes the cheapest allowed level.
+  if (req?.thinking?.type === "disabled") {
+    return isGeminiModel(model) ? { effort: "low" } : { enabled: false };
+  }
   const effort = req?.output_config?.effort;
   const EFFORT_MAP: Record<string, string> = {
     low: "low",
@@ -325,14 +338,25 @@ async function glmChatCompletion(opts: {
       ? extractResultsFromZai
       : (c: any) => extractResultsFromAnnotations(c?.choices?.[0]?.message?.annotations);
     try {
+      // Streaming clients get the incremental loop: the first upstream call is
+      // made here so auth/rate-limit failures still surface as a real HTTP
+      // status instead of an SSE error event.
+      if (wantStream) {
+        const streamReq = { ...openaiReq, stream: true, stream_options: { include_usage: true },
+          tools: [...(openaiReq.tools || []), ...(providerSearchTool ? [providerSearchTool] : []), ...(fetchTool ? [webFetchFunctionTool()] : [])] };
+        const firstResponse = await callUpstream(streamReq);
+        return new Response(streamWebToolLoop({
+          openaiReq, model, query: lastUserText(anthropicReq),
+          searchTool: providerSearchTool, wantFetch: !!fetchTool, extractSearch,
+          firstResponse, callUpstream,
+        }), { headers: SSE_HEADERS });
+      }
       const message = await runWebToolLoop({
         openaiReq, model, query: lastUserText(anthropicReq),
         searchTool: providerSearchTool, wantFetch: !!fetchTool, extractSearch,
         callUpstream: async (reqBody: any) => (await callUpstream(reqBody)).json(),
       });
-      return wantStream
-        ? new Response(anthropicMessageToSSE(message), { headers: SSE_HEADERS })
-        : new Response(JSON.stringify(message), { headers: JSON_HEADERS });
+      return new Response(JSON.stringify(message), { headers: JSON_HEADERS });
     } catch (e: any) {
       if (e && e.__response) return e.__response as Response;
       throw e;
@@ -493,10 +517,15 @@ async function handleRequest(request: Request): Promise<Response> {
         if (openrouter) req.model = mapModelForOpenRouter(req.model);
 
         const openaiReq = formatAnthropicToOpenAI(req);
-        // GLM effort mapping applies on both the OpenRouter and /zaisub routes.
-        if ((openrouter || zaisub) && isGlmModel(req.model)) {
-          const reasoning = mapEffortToReasoning(req);
+        // Effort mapping applies on both the OpenRouter and /zaisub routes,
+        // for every upstream that accepts OpenRouter's `reasoning` parameter.
+        if ((openrouter || zaisub) && (isGlmModel(req.model) || isGeminiModel(req.model))) {
+          const reasoning = mapEffortToReasoning(req, req.model);
           if (reasoning) openaiReq.reasoning = reasoning;
+        }
+        if (openrouter && isGeminiModel(req.model) && typeof openaiReq.max_tokens === "number"
+            && openaiReq.max_tokens < GEMINI_MIN_OUTPUT_TOKENS) {
+          openaiReq.max_tokens = GEMINI_MIN_OUTPUT_TOKENS;
         }
 
         // OpenRouter and Z.ai go through the web-tool-aware GLM path (native
